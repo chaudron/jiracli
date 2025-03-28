@@ -24,7 +24,7 @@ from jcli.utils import RuntimeEvalChoice
 from tabulate import tabulate
 
 reporting_choices = ['table', 'csv', 'simple', 'json',
-                     'report']
+                     'report', 'ereport']
 
 try:
     import jinja2
@@ -227,7 +227,151 @@ def format_issue_output(jobj, issues, output, len_, sort=None, template_file=Non
     elif output == 'template':
         final = template_output(template_file, issues, jobj)
 
+    elif output == 'ereport':
+        final = list_output_ereport(jobj, issues, sorted=sort != "none")
+
     return final
+
+
+def list_output_ereport(jobj, issues, sorted=False) -> None:
+    """
+    Function that sorts the list of issues in the format required for the
+    weekly reports. If sorted is False, items in the subsection are sorted on
+    priority.
+    """
+    def get_field_by_name(issue, name, default=None):
+        value = jobj.get_field(issue, name)
+        if default is not None and (value is None or len(value) == 0):
+            return default
+        return value
+
+    def get_relative_priority(issue) -> int:
+        priority_list = ["Undefined", "Minor", "Normal", "Major", "Critical",
+                         "Blocker"]
+        severity_list = ["None", "Informational", "Low", "Moderate",
+                         "Important", "Critical"]
+        try:
+            relative = priority_list.index(
+                get_field_by_name(issue, "priority")) * 100
+        except ValueError:
+            relative = 0
+
+        try:
+            relative += severity_list.index(
+                get_field_by_name(issue, "Severity"))
+        except ValueError:
+            pass
+
+        relative += 1000 if is_issue_release_blocker(issue) else 0
+        return relative
+
+    def get_report_flags(issue) -> str:
+        prio = get_field_by_name(issue, "priority", default="--")
+        sev = get_field_by_name(issue, "Severity", default="--")
+        prio = "m" if prio == "Minor" else prio
+        prio = prio[0] if prio != "Undefined" else "-"
+        sev = "i" if prio in "Informational" else sev
+        sev = sev[0] if sev != "None" else "-"
+        return f"[P:{prio}{sev}]"
+
+    def truncate_str(s, width):
+        """ Truncate a string on word boundary, and add "..." to the end """
+        if width <= 0:
+            return s
+
+        if len(s) <= width:
+            return s[0:width]
+
+        return s[0:width - 3].rsplit(None, 1)[0] + '...'
+
+    def is_issue_epic(issue) -> bool:
+        try:
+            if issue.fields.issuetype.name == "Epic":
+                return True
+            else:
+                return False
+        except AttributeError:
+            return False
+
+    def is_issue_post_plus(issue) -> bool:
+        try:
+            statuses = ["Dev Complete", "Testing", "Review", "Verified",
+                        "Release Pending", "Resolved", "Integration", "Closed"]
+
+            if issue.fields.status.name in statuses:
+                return True
+            else:
+                return False
+        except AttributeError:
+            return False
+
+    def is_issue_release_blocker(issue) -> bool:
+        return get_field_by_name(issue, "Release Blocker") in \
+            ["Approved Blocker",
+             "Approved Exception"]
+
+    def is_issue_priority(issue) -> bool:
+        if get_field_by_name(issue, "Severity") in ["Critical", "Blocker"] or \
+           get_field_by_name(issue, "priority") in ["Critical", "Blocker"] or \
+           is_issue_release_blocker(issue):
+            return True
+
+        return False
+
+    def show_issue_list(issues, sorted=False) -> str:
+        output = ""
+
+        key_len = len(max(issues, key=lambda issue: len(issue.key)).key)
+        sum_len = 79 - len(" * ") - key_len - len(" [P:--] ")
+
+        if not sorted:
+            issues.sort(reverse=True,
+                        key=lambda issue: get_relative_priority(issue))
+
+        for issue in issues:
+            output += f" * {issue.key:<{key_len}} {get_report_flags(issue)} " \
+                + truncate_str(get_field_by_name(issue, "summary"), sum_len) \
+                + "\n"
+
+        return output
+
+    non_priority_list = []
+    post_plus_list = []
+    priority_list = []
+    epic_list = []
+    output = ""
+
+    for issue in issues:
+        if is_issue_epic(issue):
+            epic_list.append(issue)
+        elif is_issue_post_plus(issue):
+            post_plus_list.append(issue)
+        elif is_issue_priority(issue):
+            priority_list.append(issue)
+        else:
+            non_priority_list.append(issue)
+
+    if len(priority_list) > 0:
+        output += "Issues (Priority, Exceptions, Blockers):\n"
+        output += "========================================\n"
+        output += show_issue_list(priority_list, sorted=sorted) + "\n\n"
+
+    if len(non_priority_list) > 0:
+        output += "Issues (non-priority list):\n"
+        output += "===========================\n"
+        output += show_issue_list(non_priority_list, sorted=sorted) + "\n\n"
+
+    if len(post_plus_list) > 0:
+        output += "POST+ state:\n"
+        output += "============\n"
+        output += show_issue_list(post_plus_list, sorted=sorted) + "\n\n"
+
+    if len(epic_list) > 0:
+        output += "Issues (EPICs):\n"
+        output += "===============\n"
+        output += show_issue_list(epic_list, sorted=sorted) + "\n\n"
+
+    return output.rstrip('\n')
 
 
 @click.command(
